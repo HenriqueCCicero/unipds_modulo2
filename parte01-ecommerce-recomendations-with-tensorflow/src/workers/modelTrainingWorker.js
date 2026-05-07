@@ -1,6 +1,6 @@
 import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 import { workerEvents } from '../events/constants.js';
-const globalCtx = {};
+let _globalCtx = {};
 
 const WEIGHTS = {
     category: 0.4,
@@ -118,21 +118,64 @@ function encondeProduct(product, context) {
     ])
 }
 
+function encodeUser(user, context) {
+    if(user.purchases.length){
+        return tf.stack(
+            user.purchases.map(
+                product => encondeProduct(product, context)
+            )
+        )
+        .mean(0)
+        .reshape([
+            1, context.dimentions
+        ])
+    }
+}
+
+function createTrainingData(context) {
+    const inputs = [];
+    const labels = [];
+    context.users.forEach(user => {
+        const userVector = encodeUser(user, context).dataSync();
+        context.products.forEach(product => {
+            const productVector = encondeProduct(product, context).dataSync();
+
+            const label = user.purchases.some(
+                purchase => purchase.name === product.name ? 1 : 0
+            )
+            //combinar user + product
+            inputs.push([...userVector, ...productVector]);
+            labels.push(label);
+        });
+    });
+
+    return {
+        xs: tf.tensor2d(inputs),
+        ys: tf.tensor2d(labels, [inputs.length, 1]),
+        inputDimensions: context.dimentions * 2,
+        // tamanho = userVector + productVector
+    }
+}
+
 async function trainModel({ users }) {
     console.log('Training model with users:', users);
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 1 } });
-    const catalog = await (await fetch('/data/products.json')).json()
+    const products = await (await fetch('/data/products.json')).json()
 
-    const context = makeContext(catalog, users)
-    context.productVectors = catalog.map(product => {
+    const context = makeContext(products, users)
+    context.productVectors = products.map(product => {
         return {
            name: product.name,
            meta: {...product},
            vector: encondeProduct(product, context).dataSync()
         }
     })
-    debugger;
+    
     _globalCtx = context;
+
+    const trainingData = createTrainingData(context);
+
+    createTrainingData(context);
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 100 } });
     postMessage({ type: workerEvents.trainingComplete });
 }
