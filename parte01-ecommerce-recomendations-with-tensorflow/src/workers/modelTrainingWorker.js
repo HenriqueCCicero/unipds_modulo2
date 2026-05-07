@@ -1,6 +1,7 @@
 import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 import { workerEvents } from '../events/constants.js';
 let _globalCtx = {};
+let _model = {};
 
 const WEIGHTS = {
     category: 0.4,
@@ -135,7 +136,9 @@ function encodeUser(user, context) {
 function createTrainingData(context) {
     const inputs = [];
     const labels = [];
-    context.users.forEach(user => {
+    context.users
+    .filter(u => u.purchases.length)
+    .forEach(user => {
         const userVector = encodeUser(user, context).dataSync();
         context.products.forEach(product => {
             const productVector = encondeProduct(product, context).dataSync();
@@ -157,6 +160,107 @@ function createTrainingData(context) {
     }
 }
 
+// ====================================================================
+// 📌 Exemplo de como um usuário é ANTES da codificação
+// ====================================================================
+/*
+const exampleUser = {
+    id: 201,
+    name: 'Rafael Souza',
+    age: 27,
+    purchases: [
+        { id: 8, name: 'Boné Estiloso', category: 'acessórios', price: 39.99, color: 'preto' },
+        { id: 9, name: 'Mochila Executiva', category: 'acessórios', price: 159.99, color: 'cinza' }
+    ]
+};
+*/
+
+// ====================================================================
+// 📌 Após a codificação, o modelo NÃO vê nomes ou palavras.
+// Ele vê um VETOR NUMÉRICO (todos normalizados entre 0–1).
+// Exemplo: [preço_normalizado, idade_normalizada, cat_one_hot..., cor_one_hot...]
+//
+// Suponha categorias = ['acessórios', 'eletrônicos', 'vestuário']
+// Suponha cores      = ['preto', 'cinza', 'azul']
+//
+// Para Rafael (idade 27, categoria: acessórios, cores: preto/cinza),
+// o vetor poderia ficar assim:
+//
+// [
+//   0.45,            // peso do preço normalizado
+//   0.60,            // idade normalizada
+//   1, 0, 0,         // one-hot de categoria (acessórios = ativo)
+//   1, 0, 0          // one-hot de cores (preto e cinza ativos, azul inativo)
+// ]
+//
+// São esses números que vão para a rede neural.
+// ====================================================================
+
+
+
+// ====================================================================
+// 🧠 Configuração e treinamento da rede neural
+// ====================================================================
+async function configureNeuralNetAndTrain(trainData) {
+
+    const model = tf.sequential();
+    // Camada de entrada
+    // - inputShape: Número de features por exemplo de treino (trainData.inputDim)
+    //   Exemplo: Se o vetor produto + usuário = 20 números, então inputDim = 20
+    // - units: 128 neurônios (muitos "olhos" para detectar padrões)
+    // - activation: 'relu' (mantém apenas sinais positivos, ajuda a aprender padrões não-lineares)
+    model.add(tf.layers.dense({
+        inputShape: [trainData.inputDimensions],
+        units: 128,
+        activation: 'relu'
+    }));
+    // Camada oculta 1
+    // - 64 neurônios (menos que a primeira camada: começa a comprimir informação)
+    // - activation: 'relu' (ainda extraindo combinações relevantes de features)
+    model.add(tf.layers.dense({
+        units: 64,
+        activation: 'relu'
+    }));
+    // Camada oculta 2
+    // - 32 neurônios (mais estreita de novo, destilando as informações mais importantes)
+    //   Exemplo: De muitos sinais, mantém apenas os padrões mais fortes
+    // - activation: 'relu'
+    model.add(tf.layers.dense({
+        units: 32,
+        activation: 'relu'
+    }));
+    // Camada de saída
+    // - 1 neurônio porque vamos retornar apenas uma pontuação de recomendação
+    // - activation: 'sigmoid' comprime o resultado para o intervalo 0–1
+    //   Exemplo: 0.9 = recomendação forte, 0.1 = recomendação fraca
+    model.add(tf.layers.dense({
+        units: 1,
+        activation: 'sigmoid'
+    }));
+    model.compile({
+        optimizer: tf.train.adam(0.01),
+        loss: 'binaryCrossentropy',
+        metrics: ['accuracy']
+    });
+
+    await model.fit(trainData.xs, trainData.ys, {
+        epochs: 100,
+        batchSize: 32,
+        shuffle: true,
+        callbacks: {
+            onEpochEnd: (epoch, logs) => {
+                postMessage({
+                    type: workerEvents.trainingLog,
+                    epoch: epoch,
+                    loss: logs.loss,
+                    accuracy: logs.acc,
+                });
+            }
+        }
+    })
+
+}
+
 async function trainModel({ users }) {
     console.log('Training model with users:', users);
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 1 } });
@@ -174,6 +278,7 @@ async function trainModel({ users }) {
     _globalCtx = context;
 
     const trainingData = createTrainingData(context);
+    _model = await configureNeuralNetAndTrain(trainingData);
 
     createTrainingData(context);
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 100 } });
